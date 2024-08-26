@@ -1,0 +1,523 @@
+#include <LiquidCrystal_I2C.h>
+#include <Wire.h>
+#include "DHT.h"
+#include "ACS712.h"
+
+LiquidCrystal_I2C lcd(0x38, 20, 4);
+
+#define COUT PA6 //Current Sensor Pin
+#define VOUT PA5 //Voltage Sensor Pin
+
+#define entr  PB12 // Button
+#define up  PB13  // Button
+#define dwn  PB14  // Button
+#define bck  PB15  // Button
+
+#define FAST_SLOW_RELAY PA0 //Charging Mode relay
+#define CHARGE_ON_RELAY PA2 //Charge Mode relay
+#define CHARGE_DISCHARGE_RELAY PA1 //Charge  Discharge Mode relay
+
+#define BUZZ PB3
+#define DHTPIN PB4
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+ACS712 sensor(ACS712_05B, PA6);
+float Vout = 0.00;
+float vo = 0.00; // Voltage sensor Parameter
+float value = 0;
+double Vout1 = 0;
+float adc_voltage = 0.0;
+float in_voltage = 0.0;
+float R1 = 30000.0;
+float R2 = 7500.0;
+float ref_voltage = 5.0;
+int adc_value = 0;
+double Current1 = 0;
+float Current_c = 0;
+const double scale_factor = 0.1; // 20A
+const double vRef = 5.00;
+const double resConvert = 1024;
+double resADC = vRef / resConvert;
+double zeroPoint = vRef / 2;
+int menu = 1;
+bool charge_discharge = false;
+bool fast_slow_charge = true;
+int t = 0;
+unsigned  long int prev_millis = 0;
+byte temp[8] = //icon for termometer
+{
+  B00100,
+  B01010,
+  B01010,
+  B01110,
+  B01110,
+  B11111,
+  B11111,
+  B01110
+};
+void setup()
+{
+  pinMode(entr, INPUT);
+  pinMode(bck, INPUT);
+  pinMode(up, INPUT);
+  pinMode(dwn, INPUT);
+  pinMode(PA6, INPUT);
+  pinMode(VOUT, INPUT);
+  pinMode(FAST_SLOW_RELAY, OUTPUT);
+  pinMode(CHARGE_ON_RELAY, OUTPUT);
+  pinMode(CHARGE_DISCHARGE_RELAY, OUTPUT);
+  pinMode(BUZZ, OUTPUT);
+  dht.begin();
+  lcd.init();
+//  lcd.backlight();                   // Turn backlight ON
+  lcd.setCursor(3, 0);               // Go to column 0, row 0
+  lcd.print(" EV BMS With ");
+  lcd.setCursor(3, 1);               // Go to column 0, row 1
+  lcd.print("Charge Monitor");
+  lcd.setCursor(7, 2);               // Go to column 0, row 1
+  lcd.print("And");
+  lcd.setCursor(3, 3);               // Go to column 0, row 1
+  lcd.print("Fire Protection");
+  lcd.createChar(1, temp);
+  delay(2000);
+
+  digitalWrite(FAST_SLOW_RELAY, LOW);
+  digitalWrite(CHARGE_ON_RELAY, LOW);
+  digitalWrite(CHARGE_DISCHARGE_RELAY, LOW);
+  digitalWrite(BUZZ, HIGH);
+  delay(500);
+  digitalWrite(BUZZ, LOW);
+  calibrate_c();
+
+  // Go to column 0, row 1
+}
+
+void loop()
+{
+  read_values();
+
+  lcd.clear();
+  lcd.print(F("Battery Monitor "));
+  lcd.setCursor(0, 1);
+  lcd.print(F("Current:"));
+  lcd.print(Current1);
+  lcd.setCursor(13, 1);
+  lcd.print("A");
+  lcd.setCursor(15, 1);
+  lcd.write(1);
+  lcd.print(F(" "));
+  lcd.setCursor(16, 1);
+  lcd.print(F(":"));
+  lcd.setCursor(17, 1);
+  lcd.print(t);
+  lcd.setCursor(0, 2);
+  lcd.print("Voltage:");
+  lcd.print(vo);
+  lcd.setCursor(14, 2);
+  lcd.print("V");
+  lcd.setCursor(0, 3);
+  lcd.print(F("MENU"));
+  lcd.setCursor(13, 3);
+  lcd.print(F("SETTING"));
+  calibrate_c();
+
+  if (digitalRead(entr) == LOW)
+  {
+    charge_discharge = true;
+    lcd.clear();
+    lcd.print(F("->>1.CHARGE"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("   2.DIS-CHARGE"));
+    delay(1000);
+    while (1)
+    {
+      if (digitalRead(up) == LOW)
+      {
+        lcd.clear();
+        lcd.print(F("->>1.CHARGE"));
+        lcd.setCursor(0, 1);
+        lcd.print(F("   2.DIS-CHARGE"));
+        charge_discharge = true;
+      }
+      else if (digitalRead(dwn) == LOW)
+      {
+        lcd.clear();
+        lcd.print(F("   1.CHARGE"));
+        lcd.setCursor(0, 1);
+        lcd.print(F("->>2.DIS-CHARGE"));
+        charge_discharge = false;
+      }
+      else if (digitalRead(entr) == LOW && charge_discharge == true)
+      {
+        delay(1000);
+        run_charge();
+      }
+      else if (digitalRead(entr) == LOW && charge_discharge == false)
+      {
+        delay(1000);
+        run_discharge();
+      }
+      else if (digitalRead(bck) == LOW)
+      {
+        digitalWrite(FAST_SLOW_RELAY, LOW);
+        digitalWrite(CHARGE_ON_RELAY, LOW);
+        digitalWrite(CHARGE_DISCHARGE_RELAY, LOW);
+        break;
+      }
+    }
+    delay(200);
+  }
+  else if (digitalRead(bck) == LOW)
+  {
+    fast_slow_charge = true;
+    lcd.clear();
+    lcd.print(F("->>1.Fast Charging"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("   2.Slow Charging"));
+    delay(1000);
+    while (1)
+    {
+      if (digitalRead(up) == LOW)
+      {
+        lcd.clear();
+        lcd.print(F("->>1.Fast Charging"));
+        lcd.setCursor(0, 1);
+        lcd.print(F("   2.Slow Charging"));
+        fast_slow_charge = true;
+
+      }
+      else if (digitalRead(dwn) == LOW)
+      {
+        lcd.clear();
+        lcd.print(F("   1.Fast Charging"));
+        lcd.setCursor(0, 1);
+        lcd.print(F("->>2.Slow Charging"));
+        fast_slow_charge = false;
+      }
+      else if (digitalRead(entr) == LOW || digitalRead(bck) == LOW)
+      {
+        delay(1000);
+        digitalWrite(FAST_SLOW_RELAY, LOW);
+        digitalWrite(CHARGE_ON_RELAY, LOW);
+        digitalWrite(CHARGE_DISCHARGE_RELAY, LOW);
+        break;
+      }
+      delay(200);
+    }
+  }
+  delay(200);
+}
+
+void read_values()
+
+{
+  t = dht.readTemperature();
+  Serial.print("Temperature = ");
+  Serial.println(t);
+  if (t > 40)
+  {
+    High_Temp();
+  }
+
+  value = analogRead(VOUT);
+
+  Vout = (value * 5.0) / 1024.0;
+  Serial.print("InputVoltage = ");
+  Serial.println(Vout);
+  vo = Vout - 2.55;
+  if (vo < 0.5)
+  {
+    vo = 0.00;
+  }
+
+
+  Serial.print("InputVoltage = ");
+  Serial.println(vo);
+  //current sensor
+  for (int i = 0; i < 1000; i++) {
+    Vout1 = (Vout1 + (resADC * analogRead(PA6)));
+    delay(1);
+  }
+  // Get Vout in mv
+  Vout1 = Vout1 / 1000;
+  // Convert Vout into Current using Scale Factor
+  Current1 = (Vout1 - zeroPoint) / scale_factor;
+  Serial.print("rawCurrent = ");
+  Serial.println(Current1);
+  Current1 =   Current1 - Current_c;
+  if (Current1 < 0)
+  {
+    Current1 = (Current1 * (-1));
+  }
+  delay(100);
+  Serial.print("InputCurrent = ");
+  Serial.println(Current1);
+}
+
+void run_discharge()
+{
+  while (1)
+  {
+    read_values();
+
+    if (fast_slow_charge == true)
+    {
+      lcd.clear();
+      lcd.print(F("Battery Monitor "));
+      lcd.setCursor(0, 1);
+      lcd.print(F("Current:"));
+      lcd.print(Current1);
+      lcd.setCursor(13, 1);
+      lcd.print("A");
+      lcd.setCursor(15, 1);
+      lcd.write(1);
+      lcd.print(F(" "));
+      lcd.setCursor(16, 1);
+      lcd.print(F(":"));
+      lcd.setCursor(17, 1);
+      lcd.print(t);
+      lcd.setCursor(0, 2);
+      lcd.print("Voltage:");
+      lcd.print(vo);
+      lcd.setCursor(14, 2);
+      lcd.print("V");
+      lcd.setCursor(0, 3);
+      lcd.print(F("DISCHARGE"));
+      digitalWrite(CHARGE_ON_RELAY, LOW);
+      digitalWrite(FAST_SLOW_RELAY, LOW);
+      digitalWrite(CHARGE_DISCHARGE_RELAY, HIGH);
+    }
+    else
+    {
+      lcd.clear();
+      lcd.print(F("Battery Monitor "));
+      lcd.setCursor(0, 1);
+      lcd.print(F("Current:"));
+      lcd.print(Current1);
+      lcd.setCursor(13, 1);
+      lcd.print("A");
+      lcd.setCursor(15, 1);
+      lcd.write(1);
+      lcd.print(F(" "));
+      lcd.setCursor(16, 1);
+      lcd.print(F(":"));
+      lcd.setCursor(17, 1);
+      lcd.print(t);
+      lcd.setCursor(0, 2);
+      lcd.print("Voltage:");
+      lcd.print(vo);
+      lcd.setCursor(14, 2);
+      lcd.print("V");
+      lcd.setCursor(0, 3);
+      lcd.print(F("DISCHARGE"));
+      digitalWrite(CHARGE_ON_RELAY, LOW);
+      digitalWrite(FAST_SLOW_RELAY, LOW);
+      digitalWrite(CHARGE_DISCHARGE_RELAY, HIGH);
+
+    }
+    if (digitalRead(bck) == LOW)
+    {
+      digitalWrite(FAST_SLOW_RELAY, LOW);
+      digitalWrite(CHARGE_ON_RELAY, LOW);
+      digitalWrite(CHARGE_DISCHARGE_RELAY, LOW);
+      break;
+    }
+    //
+    delay(200);
+  }
+}
+
+void run_charge()
+{
+  while (1)
+  {
+    read_values();
+
+    if (fast_slow_charge == true)
+    {
+      lcd.clear();
+      lcd.print(F("Battery Monitor "));
+      lcd.setCursor(0, 1);
+      lcd.print(F("Current:"));
+      lcd.print(Current1);
+      lcd.setCursor(13, 1);
+      lcd.print("A");
+      lcd.setCursor(15, 1);
+      lcd.write(1);
+      lcd.print(F(" "));
+      lcd.setCursor(16, 1);
+      lcd.print(F(":"));
+      lcd.setCursor(17, 1);
+      lcd.print(t);
+      lcd.setCursor(0, 2);
+      lcd.print("Voltage:");
+      lcd.print(vo);
+      lcd.setCursor(14, 2);
+      lcd.print("V");
+      lcd.setCursor(0, 3);
+      lcd.print(F("CHARGE"));
+      lcd.setCursor(13, 3);
+      lcd.print(F("FAST"));
+      digitalWrite(CHARGE_ON_RELAY, HIGH);
+      digitalWrite(FAST_SLOW_RELAY, HIGH);
+      digitalWrite(CHARGE_DISCHARGE_RELAY, LOW);
+      if (millis() - prev_millis >= 300000)
+      {
+        digitalWrite(CHARGE_ON_RELAY, LOW);
+        delay(500);
+        read_values();
+        delay(100);
+        if (vo > 10.25)
+        {
+          charge_full();
+        }
+        prev_millis = millis();
+        break;
+      }
+
+    }
+    else
+    {
+      lcd.clear();
+      lcd.print(F("Battery Monitor "));
+      lcd.setCursor(0, 1);
+      lcd.print(F("Current:"));
+      lcd.print(Current1);
+      lcd.setCursor(13, 1);
+      lcd.print("A");
+      lcd.setCursor(15, 1);
+      lcd.write(1);
+      lcd.print(F(" "));
+      lcd.setCursor(16, 1);
+      lcd.print(F(":"));
+      lcd.setCursor(17, 1);
+      lcd.print(t);
+      lcd.setCursor(0, 2);
+      lcd.print("Voltage:");
+      lcd.print(vo);
+      lcd.setCursor(14, 2);
+      lcd.print("V");
+      lcd.setCursor(0, 3);
+      lcd.print(F("CHARGE"));
+      lcd.setCursor(13, 3);
+      lcd.print(F("SLOW"));
+      digitalWrite(CHARGE_ON_RELAY, HIGH);
+      digitalWrite(FAST_SLOW_RELAY, LOW);
+      digitalWrite(CHARGE_DISCHARGE_RELAY, LOW);
+      if (millis() - prev_millis >= 300000)
+      {
+        digitalWrite(CHARGE_ON_RELAY, LOW);
+        delay(500);
+        read_values();
+        delay(100);
+        if (vo > 10.25)
+        {
+          charge_full();
+        }
+        prev_millis = millis();
+        break;
+      }
+
+    }
+    if (digitalRead(bck) == LOW )
+    {
+      digitalWrite(FAST_SLOW_RELAY, LOW);
+      digitalWrite(CHARGE_ON_RELAY, LOW);
+      digitalWrite(CHARGE_DISCHARGE_RELAY, LOW);
+
+      break;
+    }
+    delay(200);
+  }
+}
+
+void charge_full()
+{
+  while (1)
+  {
+    if (digitalRead(bck) == LOW || digitalRead(entr) == LOW || digitalRead(up) == LOW || digitalRead(dwn) == LOW)
+    {
+      break;
+    }
+    else
+    {
+      digitalWrite(BUZZ, HIGH);
+      delay(1000);
+      digitalWrite(BUZZ, LOW);
+      delay(5000);
+
+      digitalWrite(FAST_SLOW_RELAY, LOW);
+      digitalWrite(CHARGE_ON_RELAY, LOW);
+      digitalWrite(CHARGE_DISCHARGE_RELAY, LOW);
+      lcd.clear();
+      lcd.setCursor(0, 0);               // Go to column 0, row 0
+      lcd.print("Battery Full Charged ");
+      lcd.setCursor(2, 1);               // Go to column 0, row 1
+      lcd.print("Press Any Button");
+      lcd.setCursor(5, 2);               // Go to column 0, row 1
+      lcd.print("To Continue");
+      lcd.setCursor(0, 3);
+      lcd.print("Voltage:");
+      lcd.print(vo);
+      lcd.setCursor(14, 3);
+      lcd.print("V");
+    }
+    delay(200);
+  }
+}
+
+void High_Temp()
+{
+  while (1)
+  {
+    if (digitalRead(bck) == LOW || digitalRead(entr) == LOW || digitalRead(up) == LOW || digitalRead(dwn) == LOW || t < 50)
+    {
+      break;
+    }
+    else
+    {
+      digitalWrite(BUZZ, HIGH);
+      delay(1000);
+      digitalWrite(BUZZ, LOW);
+      delay(5000);
+
+      digitalWrite(FAST_SLOW_RELAY, LOW);
+      digitalWrite(CHARGE_ON_RELAY, LOW);
+      digitalWrite(CHARGE_DISCHARGE_RELAY, LOW);
+      lcd.clear();
+      lcd.setCursor(0, 0);               // Go to column 0, row 0
+      lcd.print("Battery Temperature");
+      lcd.setCursor(0, 1);               // Go to column 0, row 1
+      lcd.print("is High");
+      lcd.setCursor(16, 1);
+      lcd.write(1);
+      lcd.print(F(" "));
+      lcd.setCursor(17, 1);
+      lcd.print(F(":"));
+      lcd.setCursor(18, 1);
+      lcd.print(t);
+      lcd.setCursor(2, 2);               // Go to column 0, row 1
+      lcd.print("Press Any Button");
+      lcd.setCursor(5, 3);               // Go to column 0, row 1
+      lcd.print("To Continue");
+
+    }
+    delay(500);
+  }
+}
+
+void calibrate_c()
+{
+  for (int i = 0; i < 1000; i++) {
+    Vout1 = (Vout1 + (resADC * analogRead(PA6)));
+    delay(1);
+  }
+  // Get Vout in mv
+  Vout1 = Vout1 / 1000;
+  // Convert Vout into Current using Scale Factor
+  Current1 = (Vout1 - zeroPoint) / scale_factor;
+  Serial.print("rawCurrent = ");
+  Serial.println(Current1);
+  Current_c = Current1;
+
+}
